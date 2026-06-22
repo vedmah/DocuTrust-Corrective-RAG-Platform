@@ -1,389 +1,131 @@
-"""
-app.py
-------
-DocuTrust: Enterprise Advanced RAG Platform with Automated Self-Correction.
-
-A Streamlit front end for the CRAG (Corrective RAG) pipeline defined in
-rag_engine.py. Split-pane layout:
-  LEFT  -> document upload, live step-by-step agent evaluation log
-  RIGHT -> validated, strictly-cited answers + conversation history
-
-Run with:
-    export ANTHROPIC_API_KEY=sk-ant-...
-    streamlit run app.py
-"""
-
-import os
-import time
-
+import streamlit as pd
 import streamlit as st
+import time
+import random
 
-import rag_engine as rg
-
-
-# --------------------------------------------------------------------------- #
-# Page config & styling
-# --------------------------------------------------------------------------- #
-
+# 1. Page Configuration (Wide Layout for Split-Pane)
 st.set_page_config(
-    page_title="DocuTrust | Corrective RAG Platform",
-    page_icon="🛡️",
+    page_title="DocuTrust | Enterprise Advanced CRAG",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-CUSTOM_CSS = """
-<style>
-    .stApp { background-color: #0f1116; }
+# Application Header
+st.title("🛡️ DocuTrust")
+st.caption("Enterprise Advanced RAG Platform with Automated Self-Correction & Verification")
+st.markdown("---")
 
-    .docutrust-header {
-        padding: 1.1rem 1.4rem;
-        background: linear-gradient(135deg, #1a2740 0%, #101826 100%);
-        border: 1px solid #2a3854;
-        border-radius: 12px;
-        margin-bottom: 1.2rem;
-    }
-    .docutrust-header h1 {
-        font-size: 1.5rem;
-        margin: 0;
-        color: #e8edf7;
-        font-weight: 700;
-    }
-    .docutrust-header p {
-        margin: 0.25rem 0 0 0;
-        color: #8a9bbf;
-        font-size: 0.88rem;
-    }
+# 2. Simulated CRAG Backend Agents (Replace these with your actual LangGraph/CrewAI & MongoDB code)
+def simulate_crag_pipeline(query, document_name):
+    """Simulates the LangGraph / CrewAI Corrective RAG flow with real-time logging"""
+    
+    logs = []
+    
+    # Step 1: Retrieval Agent
+    yield "status", "🔄 Agent 1: Retrieving structural text chunks...", None
+    time.sleep(1.2)
+    chunks_found = random.choice([True, False]) # Simulating whether local doc has the answer
+    yield "log", f"✅ Retrieved 4 semantic chunks from `{document_name}`.", None
 
-    .pane-title {
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: #6b7fa8;
-        margin-bottom: 0.6rem;
-        border-bottom: 1px solid #232d42;
-        padding-bottom: 0.4rem;
-    }
-
-    .trace-card {
-        border-radius: 8px;
-        padding: 0.55rem 0.8rem;
-        margin-bottom: 0.45rem;
-        border-left: 3px solid #364868;
-        background: #161b27;
-        font-size: 0.85rem;
-    }
-    .trace-card.status-running { border-left-color: #5b8def; background: #131c2e; }
-    .trace-card.status-done    { border-left-color: #3ecf8e; }
-    .trace-card.status-warning { border-left-color: #e8b339; }
-    .trace-card.status-error   { border-left-color: #e85f5f; }
-
-    .trace-agent {
-        font-weight: 700;
-        color: #cdd8ef;
-        font-size: 0.78rem;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-    }
-    .trace-message { color: #aab6d3; margin-top: 0.15rem; }
-    .trace-detail {
-        color: #6b7fa8;
-        font-size: 0.76rem;
-        margin-top: 0.25rem;
-        font-style: italic;
-    }
-
-    .answer-box {
-        background: #131826;
-        border: 1px solid #232d42;
-        border-radius: 10px;
-        padding: 1rem 1.2rem;
-        margin-bottom: 0.8rem;
-        color: #dde4f5;
-        line-height: 1.55;
-    }
-
-    .citation-card {
-        background: #161b27;
-        border: 1px solid #232d42;
-        border-radius: 8px;
-        padding: 0.6rem 0.8rem;
-        margin-bottom: 0.5rem;
-        font-size: 0.82rem;
-    }
-    .citation-marker {
-        display: inline-block;
-        background: #2a3854;
-        color: #9fc3ff;
-        border-radius: 4px;
-        padding: 0.05rem 0.45rem;
-        font-weight: 700;
-        margin-right: 0.4rem;
-        font-size: 0.75rem;
-    }
-    .citation-source { color: #cdd8ef; font-weight: 600; }
-    .citation-score { color: #6b7fa8; font-size: 0.74rem; }
-    .citation-preview { color: #8a9bbf; margin-top: 0.3rem; font-style: italic; }
-    .citation-web-badge {
-        background: #3a2e14; color: #e8b339; border-radius: 4px;
-        padding: 0.05rem 0.4rem; font-size: 0.68rem; margin-left: 0.4rem;
-    }
-
-    .fallback-banner {
-        background: #2a2410;
-        border: 1px solid #4a3f17;
-        color: #e8c95f;
-        border-radius: 8px;
-        padding: 0.5rem 0.8rem;
-        font-size: 0.82rem;
-        margin-bottom: 0.8rem;
-    }
-
-    div[data-testid="stChatMessage"] { background: transparent; }
-</style>
-"""
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-
-
-# --------------------------------------------------------------------------- #
-# Cached resources (models loaded once per server process)
-# --------------------------------------------------------------------------- #
-
-@st.cache_resource(show_spinner="Loading embedding model...")
-def get_embedder():
-    return rg.load_embedder()
-
-
-@st.cache_resource(show_spinner="Loading cross-encoder grading model...")
-def get_cross_encoder():
-    return rg.load_cross_encoder()
-
-
-def get_claude_client():
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or st.session_state.get("api_key_override")
-    if not api_key:
-        return None
-    return rg.anthropic.Anthropic(api_key=api_key)
-
-
-# --------------------------------------------------------------------------- #
-# Session state init
-# --------------------------------------------------------------------------- #
-
-if "index" not in st.session_state:
-    st.session_state.index = None
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
-if "indexed_filenames" not in st.session_state:
-    st.session_state.indexed_filenames = []
-if "trace_log" not in st.session_state:
-    st.session_state.trace_log = []
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # list of {"query":..., "result": RAGResult}
-if "processing" not in st.session_state:
-    st.session_state.processing = False
-
-
-# --------------------------------------------------------------------------- #
-# Header
-# --------------------------------------------------------------------------- #
-
-st.markdown(
-    """
-    <div class="docutrust-header">
-        <h1>🛡️ DocuTrust</h1>
-        <p>Self-correcting Retrieval-Augmented Generation for enterprise policy documents — cross-encoder graded retrieval, live agent trace, strict citations.</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# --------------------------------------------------------------------------- #
-# Layout: split pane
-# --------------------------------------------------------------------------- #
-
-left, right = st.columns([0.42, 0.58], gap="medium")
-
-
-# ============================== LEFT PANE ================================= #
-with left:
-    st.markdown('<div class="pane-title">📂 Document Intake & Agent Trace</div>', unsafe_allow_html=True)
-
-    with st.expander("⚙️ API configuration", expanded=not bool(os.environ.get("ANTHROPIC_API_KEY"))):
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            key_input = st.text_input(
-                "Anthropic API key",
-                type="password",
-                help="Set ANTHROPIC_API_KEY as an environment variable to skip this, e.g. `export ANTHROPIC_API_KEY=sk-ant-...`",
-                value=st.session_state.get("api_key_override", ""),
-            )
-            if key_input:
-                st.session_state.api_key_override = key_input
-        else:
-            st.success("ANTHROPIC_API_KEY found in environment.")
-
-    uploaded_files = st.file_uploader(
-        "Drop multi-page policy PDF(s) here",
-        type=["pdf"],
-        accept_multiple_files=True,
-    )
-
-    col_a, col_b = st.columns(2)
-    with col_a:
-        index_clicked = st.button("🔍 Build Vector Index", use_container_width=True, type="primary")
-    with col_b:
-        clear_clicked = st.button("🗑️ Clear Index", use_container_width=True)
-
-    if clear_clicked:
-        st.session_state.index = None
-        st.session_state.chunks = []
-        st.session_state.indexed_filenames = []
-        st.session_state.trace_log = []
-        st.session_state.chat_history = []
-        st.rerun()
-
-    if st.session_state.indexed_filenames:
-        st.caption(
-            f"📚 Indexed: {', '.join(st.session_state.indexed_filenames)} "
-            f"({len(st.session_state.chunks)} chunks)"
-        )
-
-    trace_placeholder = st.container(height=480)
-
-    def render_trace_log():
-        with trace_placeholder:
-            trace_placeholder.empty()
-            for ev in st.session_state.trace_log:
-                icon = {"running": "⏳", "done": "✅", "warning": "⚠️", "error": "❌"}.get(ev.status, "•")
-                detail_html = f'<div class="trace-detail">{ev.detail}</div>' if ev.detail else ""
-                st.markdown(
-                    f"""
-                    <div class="trace-card status-{ev.status}">
-                        <div class="trace-agent">{icon} {ev.agent}</div>
-                        <div class="trace-message">{ev.message}</div>
-                        {detail_html}
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    if index_clicked:
-        if not uploaded_files:
-            st.warning("Please upload at least one PDF before building the index.")
-        else:
-            st.session_state.trace_log = []
-            embedder = get_embedder()
-
-            def on_trace(ev: rg.TraceEvent):
-                st.session_state.trace_log.append(ev)
-                render_trace_log()
-
-            docs = [(f.name, f.read()) for f in uploaded_files]
-            with st.spinner("Running ingestion pipeline..."):
-                index, chunks = rg.build_index(docs, embedder, on_trace)
-
-            if index is not None:
-                st.session_state.index = index
-                st.session_state.chunks = chunks
-                st.session_state.indexed_filenames = [f.name for f in uploaded_files]
-                st.success(f"Indexed {len(chunks)} chunks from {len(uploaded_files)} document(s).")
-                st.rerun()
-
-    render_trace_log()
-
-
-# ============================== RIGHT PANE ================================= #
-with right:
-    st.markdown('<div class="pane-title">💬 Validated, Cited Answers</div>', unsafe_allow_html=True)
-
-    if st.session_state.index is None:
-        st.info("Upload and index a document on the left to start asking questions.")
+    # Step 2: Grading Agent (Cross-Encoder)
+    yield "status", "🧠 Agent 2: Cross-checking document relevance via Cross-Encoder...", None
+    time.sleep(1.5)
+    
+    if chunks_found:
+        yield "log", "🔥 High relevance score detected (0.89). Proceeding to generation.", None
+        confidence = "HIGH (Local Document)"
+        source = f"{document_name}, Page 4, Section 2.1"
+        answer = f"Based on the official corporate packet `{document_name}`, all requests must be submitted 14 business days prior. Strict compliance is mandatory under Section 2.1."
     else:
-        for turn in st.session_state.chat_history:
-            with st.chat_message("user"):
-                st.write(turn["query"])
-            with st.chat_message("assistant"):
-                result: rg.RAGResult = turn["result"]
-                if result.used_web_fallback:
-                    st.markdown(
-                        '<div class="fallback-banner">⚠️ Local document context was insufficient — '
-                        "the corrective agent rewrote the query and pulled supplementary context from a live web search.</div>",
-                        unsafe_allow_html=True,
-                    )
-                st.markdown(f'<div class="answer-box">{result.answer}</div>', unsafe_allow_html=True)
+        # Step 3: Correction Agent (Query Rewriter & Web Fallback)
+        yield "log", "⚠️ Low relevance score detected (0.32). Local chunks insufficient.", None
+        yield "status", "🔧 Agent 3: Rewriting query for fallback web search...", None
+        time.sleep(1.0)
+        rewritten_query = f"Enterprise corporate policy regulations for {query}"
+        yield "log", f"🌐 Searching verified fallback databases for: *'{rewritten_query}'*", None
+        time.sleep(1.5)
+        confidence = "EXTERNALLY VERIFIED (Web Fallback)"
+        source = "Regulatory Compliance Portal (Internal Fallback Index)"
+        answer = "Local documents lacked this specific update, but verified fallback tracking indicates that standard compliance processing times have been extended to 21 days for Q3/Q4."
 
-                if result.citations:
-                    st.markdown("**Sources**")
-                    for c in result.citations:
-                        web_badge = '<span class="citation-web-badge">WEB</span>' if c["origin"] == "web" else ""
-                        href_line = f'<br><a href="{c["href"]}" target="_blank">{c["href"]}</a>' if c.get("href") else ""
-                        st.markdown(
-                            f"""
-                            <div class="citation-card">
-                                <span class="citation-marker">{c['marker']}</span>
-                                <span class="citation-source">{c['source']}</span>{web_badge}
-                                <span class="citation-score"> &nbsp;relevance score: {c['score']}</span>
-                                <div class="citation-preview">"{c['text_preview']}"{href_line}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
+    # Step 4: Generation Agent
+    yield "status", "✍️ Agent 4: Synthesizing final response and citations...", None
+    time.sleep(1.0)
+    
+    yield "result", answer, {"confidence": confidence, "source": source}
 
-        query = st.chat_input("Ask a question about the uploaded policy document(s)...")
+# 3. UI Layout: Split-Pane Design
+col1, col2 = st.columns([1, 1], gap="large")
 
-        if query:
-            claude_client = get_claude_client()
-            if claude_client is None:
-                st.error("No Anthropic API key found. Set it in the sidebar config or as ANTHROPIC_API_KEY.")
-            else:
-                with st.chat_message("user"):
-                    st.write(query)
+# LEFT PANE: Document Upload & Agent Evaluation Logs
+with col1:
+    st.subheader("📁 Document Ingestion & Trace Logs")
+    uploaded_file = st.file_uploader("Drop multi-page corporate PDFs here", type=["pdf"])
+    
+    if uploaded_file:
+        st.success(f"Successfully indexed: `{uploaded_file.name}`")
+        
+        # Metadata Viewer (Simulating MongoDB metadata tracking)
+        with st.expander("📊 Document Metadata (MongoDB State)"):
+            st.json({
+                "document_id": "doc_98234_x",
+                "filename": uploaded_file.name,
+                "file_size_kb": round(uploaded_file.size / 1024, 2),
+                "status": "Indexed",
+                "vector_chunks": 42
+            })
+            
+    st.markdown("### 🪵 Real-Time Agent Evaluation Logs")
+    log_container = st.empty()
+    
+    if "pipeline_running" in st.session_state and st.session_state.pipeline_running:
+        log_box = log_container.container()
+        # This will hold our streaming statuses dynamically
 
-                st.session_state.trace_log = []
+# RIGHT PANE: Querying & Validated Outputs
+with col2:
+    st.subheader("💬 Verified Query Desk")
+    user_query = st.text_input(
+        "Ask a policy or compliance question:", 
+        placeholder="e.g., What is the submission timeline for travel expense reports?",
+        disabled=not uploaded_file
+    )
+    
+    if not uploaded_file:
+        st.info("💡 Please upload a corporate PDF on the left pane to unlock the query desk.")
+        
+    submit_button = st.button("Run Verified Search", type="primary", disabled=not uploaded_file)
 
-                def on_trace(ev: rg.TraceEvent):
-                    st.session_state.trace_log.append(ev)
-                    render_trace_log()
-
-                with st.chat_message("assistant"):
-                    with st.spinner("Running Corrective RAG pipeline..."):
-                        cross_encoder = get_cross_encoder()
-                        embedder = get_embedder()
-                        result = rg.run_crag_pipeline(
-                            query=query,
-                            index=st.session_state.index,
-                            chunks=st.session_state.chunks,
-                            embedder=embedder,
-                            cross_encoder=cross_encoder,
-                            claude_client=claude_client,
-                            on_trace=on_trace,
-                        )
-
-                    if result.used_web_fallback:
-                        st.markdown(
-                            '<div class="fallback-banner">⚠️ Local document context was insufficient — '
-                            "the corrective agent rewrote the query and pulled supplementary context from a live web search.</div>",
-                            unsafe_allow_html=True,
-                        )
-                    st.markdown(f'<div class="answer-box">{result.answer}</div>', unsafe_allow_html=True)
-
-                    if result.citations:
-                        st.markdown("**Sources**")
-                        for c in result.citations:
-                            web_badge = '<span class="citation-web-badge">WEB</span>' if c["origin"] == "web" else ""
-                            href_line = f'<br><a href="{c["href"]}" target="_blank">{c["href"]}</a>' if c.get("href") else ""
-                            st.markdown(
-                                f"""
-                                <div class="citation-card">
-                                    <span class="citation-marker">{c['marker']}</span>
-                                    <span class="citation-source">{c['source']}</span>{web_badge}
-                                    <span class="citation-score"> &nbsp;relevance score: {c['score']}</span>
-                                    <div class="citation-preview">"{c['text_preview']}"{href_line}</div>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
-                            )
-
-                st.session_state.chat_history.append({"query": query, "result": result})
-                render_trace_log()
+# 4. Interaction Controller / Execution Loop
+if submit_button and user_query:
+    st.session_state.pipeline_running = True
+    
+    with col1:
+        # We rewrite the log container dynamically using Streamlit's status widget
+        with st.status("🚀 Initializing CRAG Multi-Agent Pipeline...", expanded=True) as status:
+            
+            for output_type, payload, meta in simulate_crag_pipeline(user_query, uploaded_file.name):
+                if output_type == "status":
+                    status.update(label=payload)
+                elif output_type == "log":
+                    st.write(payload)
+                elif output_type == "result":
+                    status.update(label="✅ Pipeline Execution Complete!", state="complete")
+                    # Save results to session state to display on the right
+                    st.session_state.final_answer = payload
+                    st.session_state.meta = meta
+                    
+    st.session_state.pipeline_running = False
+    
+    # Display Results on the Right Side
+    with col2:
+        st.markdown("### 🤖 Validated Output")
+        st.write(st.session_state.final_answer)
+        
+        # Strict Citations Section
+        st.markdown("#### 📑 Strict Citations & Trust Metrics")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(label="Source Confidence", value=st.session_state.meta["confidence"])
+        with c2:
+            st.info(f"**Verified Source:**\n{st.session_state.meta['source']}")
