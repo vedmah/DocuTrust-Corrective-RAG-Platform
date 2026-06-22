@@ -1,90 +1,57 @@
-import streamlit as st  # Fixed: Removed the accidental duplicate 'import streamlit as pd' typo
-import time
-import random
+# app.py
+import streamlit as st
+from graph import crag_app  # Import our compiled state machine engine layout directly
 
-# 1. Page Configuration (Wide Layout for Split-Pane)
+# 1. Page Configuration Setup (Optimized for Split-Pane Presentation)
 st.set_page_config(
     page_title="DocuTrust | Enterprise Advanced CRAG",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Application Header
+# Render Application Branding & Design Accents
 st.title("🛡️ DocuTrust")
 st.caption("Enterprise Advanced RAG Platform with Automated Self-Correction & Verification")
 st.markdown("---")
 
-# 2. Initialize Session State (Fixes the disappearing output bug)
+# 2. Session State Array Management (Mitigates Streamlit Frame-Refresh State Loss)
 if "final_answer" not in st.session_state:
     st.session_state.final_answer = None
-if "meta" not in st.session_state:
-    st.session_state.meta = None
+if "meta_metrics" not in st.session_state:
+    st.session_state.meta_metrics = None
 if "pipeline_running" not in st.session_state:
     st.session_state.pipeline_running = False
 
-# 3. Simulated CRAG Backend Agents
-def simulate_crag_pipeline(query, document_name):
-    """Simulates the LangGraph / CrewAI Corrective RAG flow with real-time logging"""
-    
-    # Step 1: Retrieval Agent
-    yield "status", "🔄 Agent 1: Retrieving structural text chunks...", None
-    time.sleep(1.2)
-    chunks_found = random.choice([True, False]) # Simulating whether local doc has the answer
-    yield "log", f"✅ Retrieved 4 semantic chunks from `{document_name}`.", None
-
-    # Step 2: Grading Agent (Cross-Encoder)
-    yield "status", "🧠 Agent 2: Cross-checking document relevance via Cross-Encoder...", None
-    time.sleep(1.5)
-    
-    if chunks_found:
-        yield "log", "🔥 High relevance score detected (0.89). Proceeding to generation.", None
-        confidence = "HIGH (Local Document)"
-        source = f"{document_name}, Page 4, Section 2.1"
-        answer = f"Based on the official corporate packet `{document_name}`, all requests must be submitted 14 business days prior. Strict compliance is mandatory under Section 2.1."
-    else:
-        # Step 3: Correction Agent (Query Rewriter & Web Fallback)
-        yield "log", "⚠️ Low relevance score detected (0.32). Local chunks insufficient.", None
-        yield "status", "🔧 Agent 3: Rewriting query for fallback web search...", None
-        time.sleep(1.0)
-        rewritten_query = f"Enterprise corporate policy regulations for {query}"
-        yield "log", f"🌐 Searching verified fallback databases for: *'{rewritten_query}'*", None
-        time.sleep(1.5)
-        confidence = "EXTERNALLY VERIFIED (Web Fallback)"
-        source = "Regulatory Compliance Portal (Internal Fallback Index)"
-        answer = "Local documents lacked this specific update, but verified fallback tracking indicates that standard compliance processing times have been extended to 21 days for Q3/Q4."
-
-    # Step 4: Generation Agent
-    yield "status", "✍️ Agent 4: Synthesizing final response and citations...", None
-    time.sleep(1.0)
-    
-    yield "result", answer, {"confidence": confidence, "source": source}
-
-# 4. UI Layout: Split-Pane Design
+# 3. Main Split-Pane Column Grid Infrastructure Definition
 col1, col2 = st.columns([1, 1], gap="large")
 
-# LEFT PANE: Document Upload & Agent Evaluation Logs
+# LEFT WORKSPACE PANE: Data Intake & Multi-Agent Network Logs
 with col1:
     st.subheader("📁 Document Ingestion & Trace Logs")
-    uploaded_file = st.file_uploader("Drop multi-page corporate PDFs here", type=["pdf"])
+    uploaded_file = st.file_uploader(
+        "Drop multi-page corporate PDFs here to index context window records", 
+        type=["pdf"]
+    )
     
     if uploaded_file:
         st.success(f"Successfully indexed: `{uploaded_file.name}`")
         
-        # Metadata Viewer (Simulating MongoDB metadata tracking)
+        # Simulating active dynamic state display pulled straight from MongoDB tracking records
         with st.expander("📊 Document Metadata (MongoDB State)"):
             st.json({
                 "document_id": "doc_98234_x",
                 "filename": uploaded_file.name,
                 "file_size_kb": round(uploaded_file.size / 1024, 2),
-                "status": "Indexed",
-                "vector_chunks": 42
+                "status": "Indexed & Vectorized",
+                "vector_chunks": 42,
+                "embedding_model": "bge-large-en-v1.5"
             })
             
     st.markdown("### 🪵 Real-Time Agent Evaluation Logs")
-    # Form an explicit placeholder container so logs don't jump around out of order
+    # Setting an immutable data placeholder boundary container target to prevent viewport shifting
     log_container = st.empty()
 
-# RIGHT PANE: Querying & Validated Outputs
+# RIGHT WORKSPACE PANE: Secure Interaction Desk & Citations Delivery
 with col2:
     st.subheader("💬 Verified Query Desk")
     user_query = st.text_input(
@@ -96,38 +63,57 @@ with col2:
     if not uploaded_file:
         st.info("💡 Please upload a corporate PDF on the left pane to unlock the query desk.")
         
-    submit_button = st.button("Run Verified Search", type="primary", disabled=not uploaded_file)
+    submit_button = st.button(
+        "Run Verified Search", 
+        type="primary", 
+        disabled=not uploaded_file or not user_query
+    )
 
-# 5. Interaction Controller & Execution Loop
-if submit_button and user_query:
+# 4. Multi-Agent Engine Trigger Controller Loop
+if submit_button and user_query and uploaded_file:
     st.session_state.pipeline_running = True
     
-    # Target the empty log container on the left column explicitly
-    with log_container.status("🚀 Initializing CRAG Multi-Agent Pipeline...", expanded=True) as status:
-        for output_type, payload, meta in simulate_crag_pipeline(user_query, uploaded_file.name):
-            if output_type == "status":
-                status.update(label=payload)
-            elif output_type == "log":
-                st.write(payload)
-            elif output_type == "result":
-                status.update(label="✅ Pipeline Execution Complete!", state="complete")
-                # Save results persistently to session state
-                st.session_state.final_answer = payload
-                st.session_state.meta = meta
+    # Initialize state dictionary variables to pass through graph entry point
+    initial_graph_inputs = {"query": user_query, "documents": []}
+    
+    # Target the empty log container on the left column using Streamlit status widgets
+    with log_container.status("🚀 Initializing CRAG Multi-Agent Pipeline...", expanded=True) as status_box:
+        
+        # Actively consume live stream step dictionaries emitted by our compiled LangGraph application
+        for graph_step in crag_app.stream(initial_graph_inputs):
+            for node_identifier, agent_response in graph_step.items():
                 
+                # Extract localized system metadata trackers populated inside graph nodes
+                agent_title = agent_response.get("current_agent", node_identifier.upper())
+                runtime_log = agent_response.get("log_message", f"Completed loop step: {node_identifier}")
+                
+                # Stream logs line-by-line inside the status dropdown box
+                status_box.update(label=f"🔄 Active Node: {agent_title}...")
+                st.write(runtime_log)
+                
+                # Intercept generation structures to populate UI output frames
+                if "generation" in agent_response:
+                    st.session_state.final_answer = agent_response["generation"]
+                    st.session_state.meta_metrics = {
+                        "confidence": agent_response.get("confidence", "UNKNOWN"),
+                        "source": agent_response.get("source", "N/A")
+                    }
+                    
+        status_box.update(label="✅ Pipeline Execution Complete!", state="complete")
+        
     st.session_state.pipeline_running = False
 
-# 6. Persistent Output Rendering (Keeps the right pane visible during page reruns)
+# 5. Persistent View Rendering Engine (Maintains outputs on browser re-renders)
 if st.session_state.final_answer and not st.session_state.pipeline_running:
     with col2:
         st.markdown("---")
         st.markdown("### 🤖 Validated Output")
-        st.write(st.session_state.final_answer)
+        st.info(st.session_state.final_answer)
         
-        # Strict Citations Section
+        # Strict Citations & System Reliability Metric Dashboards
         st.markdown("#### 📑 Strict Citations & Trust Metrics")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric(label="Source Confidence", value=st.session_state.meta["confidence"])
-        with c2:
-            st.info(f"**Verified Source:**\n{st.session_state.meta['source']}")
+        metric_col1, metric_col2 = st.columns(2)
+        with metric_col1:
+            st.metric(label="Source Confidence", value=st.session_state.meta_metrics["confidence"])
+        with metric_col2:
+            st.warning(f"**Verified Source Trace:**\n{st.session_state.meta_metrics['source']}")
