@@ -1,5 +1,4 @@
-import streamlit as pd
-import streamlit as st
+import streamlit as st  # Fixed: Removed the accidental duplicate 'import streamlit as pd' typo
 import time
 import random
 
@@ -15,11 +14,17 @@ st.title("🛡️ DocuTrust")
 st.caption("Enterprise Advanced RAG Platform with Automated Self-Correction & Verification")
 st.markdown("---")
 
-# 2. Simulated CRAG Backend Agents (Replace these with your actual LangGraph/CrewAI & MongoDB code)
+# 2. Initialize Session State (Fixes the disappearing output bug)
+if "final_answer" not in st.session_state:
+    st.session_state.final_answer = None
+if "meta" not in st.session_state:
+    st.session_state.meta = None
+if "pipeline_running" not in st.session_state:
+    st.session_state.pipeline_running = False
+
+# 3. Simulated CRAG Backend Agents
 def simulate_crag_pipeline(query, document_name):
     """Simulates the LangGraph / CrewAI Corrective RAG flow with real-time logging"""
-    
-    logs = []
     
     # Step 1: Retrieval Agent
     yield "status", "🔄 Agent 1: Retrieving structural text chunks...", None
@@ -54,7 +59,7 @@ def simulate_crag_pipeline(query, document_name):
     
     yield "result", answer, {"confidence": confidence, "source": source}
 
-# 3. UI Layout: Split-Pane Design
+# 4. UI Layout: Split-Pane Design
 col1, col2 = st.columns([1, 1], gap="large")
 
 # LEFT PANE: Document Upload & Agent Evaluation Logs
@@ -76,11 +81,8 @@ with col1:
             })
             
     st.markdown("### 🪵 Real-Time Agent Evaluation Logs")
+    # Form an explicit placeholder container so logs don't jump around out of order
     log_container = st.empty()
-    
-    if "pipeline_running" in st.session_state and st.session_state.pipeline_running:
-        log_box = log_container.container()
-        # This will hold our streaming statuses dynamically
 
 # RIGHT PANE: Querying & Validated Outputs
 with col2:
@@ -96,29 +98,29 @@ with col2:
         
     submit_button = st.button("Run Verified Search", type="primary", disabled=not uploaded_file)
 
-# 4. Interaction Controller / Execution Loop
+# 5. Interaction Controller & Execution Loop
 if submit_button and user_query:
     st.session_state.pipeline_running = True
     
-    with col1:
-        # We rewrite the log container dynamically using Streamlit's status widget
-        with st.status("🚀 Initializing CRAG Multi-Agent Pipeline...", expanded=True) as status:
-            
-            for output_type, payload, meta in simulate_crag_pipeline(user_query, uploaded_file.name):
-                if output_type == "status":
-                    status.update(label=payload)
-                elif output_type == "log":
-                    st.write(payload)
-                elif output_type == "result":
-                    status.update(label="✅ Pipeline Execution Complete!", state="complete")
-                    # Save results to session state to display on the right
-                    st.session_state.final_answer = payload
-                    st.session_state.meta = meta
-                    
+    # Target the empty log container on the left column explicitly
+    with log_container.status("🚀 Initializing CRAG Multi-Agent Pipeline...", expanded=True) as status:
+        for output_type, payload, meta in simulate_crag_pipeline(user_query, uploaded_file.name):
+            if output_type == "status":
+                status.update(label=payload)
+            elif output_type == "log":
+                st.write(payload)
+            elif output_type == "result":
+                status.update(label="✅ Pipeline Execution Complete!", state="complete")
+                # Save results persistently to session state
+                st.session_state.final_answer = payload
+                st.session_state.meta = meta
+                
     st.session_state.pipeline_running = False
-    
-    # Display Results on the Right Side
+
+# 6. Persistent Output Rendering (Keeps the right pane visible during page reruns)
+if st.session_state.final_answer and not st.session_state.pipeline_running:
     with col2:
+        st.markdown("---")
         st.markdown("### 🤖 Validated Output")
         st.write(st.session_state.final_answer)
         
