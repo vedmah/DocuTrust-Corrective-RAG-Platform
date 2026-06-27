@@ -8,12 +8,15 @@ rag_engine.py. Split-pane layout:
   LEFT  -> document upload, live step-by-step agent evaluation log
   RIGHT -> validated, strictly-cited answers + conversation history
 
+No API key required. Generation runs on a local LLM via Ollama
+(https://ollama.com) -- fully free and offline.
+
 Run with:
-    export ANTHROPIC_API_KEY=sk-ant-...
+    ollama pull llama3.2      # one-time, downloads the local model
+    ollama serve               # if not already running in the background
     streamlit run app.py
 """
 
-import os
 import time
 
 import streamlit as st
@@ -159,11 +162,8 @@ def get_cross_encoder():
     return rg.load_cross_encoder()
 
 
-def get_claude_client():
-    api_key = os.environ.get("ANTHROPIC_API_KEY") or st.session_state.get("api_key_override")
-    if not api_key:
-        return None
-    return rg.anthropic.Anthropic(api_key=api_key)
+def get_ollama_client():
+    return rg.get_ollama_client()
 
 
 # --------------------------------------------------------------------------- #
@@ -210,18 +210,18 @@ left, right = st.columns([0.42, 0.58], gap="medium")
 with left:
     st.markdown('<div class="pane-title">📂 Document Intake & Agent Trace</div>', unsafe_allow_html=True)
 
-    with st.expander("⚙️ API configuration", expanded=not bool(os.environ.get("ANTHROPIC_API_KEY"))):
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            key_input = st.text_input(
-                "Anthropic API key",
-                type="password",
-                help="Set ANTHROPIC_API_KEY as an environment variable to skip this, e.g. `export ANTHROPIC_API_KEY=sk-ant-...`",
-                value=st.session_state.get("api_key_override", ""),
-            )
-            if key_input:
-                st.session_state.api_key_override = key_input
+    with st.expander("⚙️ Local model status (Ollama)", expanded=True):
+        ollama_client = get_ollama_client()
+        ollama_ok, ollama_msg = rg.check_ollama_available(ollama_client)
+        if ollama_ok:
+            st.success(f"✅ {ollama_msg} (model: `{rg.OLLAMA_MODEL}`)")
         else:
-            st.success("ANTHROPIC_API_KEY found in environment.")
+            st.error(ollama_msg)
+            st.caption(
+                "DocuTrust runs entirely free and offline using a local LLM via "
+                "[Ollama](https://ollama.com) — no API key needed. "
+                f"Install Ollama, then run `ollama pull {rg.OLLAMA_MODEL}` in a terminal."
+            )
 
     uploaded_files = st.file_uploader(
         "Drop multi-page policy PDF(s) here",
@@ -333,9 +333,10 @@ with right:
         query = st.chat_input("Ask a question about the uploaded policy document(s)...")
 
         if query:
-            claude_client = get_claude_client()
-            if claude_client is None:
-                st.error("No Anthropic API key found. Set it in the sidebar config or as ANTHROPIC_API_KEY.")
+            ollama_client = get_ollama_client()
+            ollama_ok, ollama_msg = rg.check_ollama_available(ollama_client)
+            if not ollama_ok:
+                st.error(ollama_msg)
             else:
                 with st.chat_message("user"):
                     st.write(query)
@@ -356,7 +357,7 @@ with right:
                             chunks=st.session_state.chunks,
                             embedder=embedder,
                             cross_encoder=cross_encoder,
-                            claude_client=claude_client,
+                            ollama_client=ollama_client,
                             on_trace=on_trace,
                         )
 
