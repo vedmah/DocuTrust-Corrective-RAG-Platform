@@ -8,15 +8,16 @@ rag_engine.py. Split-pane layout:
   LEFT  -> document upload, live step-by-step agent evaluation log
   RIGHT -> validated, strictly-cited answers + conversation history
 
-No API key required. Generation runs on a local LLM via Ollama
-(https://ollama.com) -- fully free and offline.
+Generation uses Groq's hosted API (free tier, no credit card) so this app
+deploys cleanly on Streamlit Community Cloud -- set GROQ_API_KEY as an env
+var / Streamlit secret, or paste a key into the sidebar at runtime.
 
 Run with:
-    ollama pull llama3.2      # one-time, downloads the local model
-    ollama serve               # if not already running in the background
+    export GROQ_API_KEY=gsk_...     # from console.groq.com
     streamlit run app.py
 """
 
+import os
 import time
 
 import streamlit as st
@@ -162,8 +163,15 @@ def get_cross_encoder():
     return rg.load_cross_encoder()
 
 
-def get_ollama_client():
-    return rg.get_ollama_client()
+def get_groq_client(api_key: str):
+    return rg.get_groq_client(api_key)
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def cached_check_groq(api_key: str) -> tuple[bool, str]:
+    """Cached so re-rendering the page doesn't burn a Groq API call every time."""
+    client = rg.get_groq_client(api_key)
+    return rg.check_groq_available(client)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +190,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []  # list of {"query":..., "result": RAGResult}
 if "processing" not in st.session_state:
     st.session_state.processing = False
+if "groq_api_key" not in st.session_state:
+    st.session_state.groq_api_key = os.environ.get("GROQ_API_KEY", "")
 
 
 # --------------------------------------------------------------------------- #
@@ -210,17 +220,30 @@ left, right = st.columns([0.42, 0.58], gap="medium")
 with left:
     st.markdown('<div class="pane-title">📂 Document Intake & Agent Trace</div>', unsafe_allow_html=True)
 
-    with st.expander("⚙️ Local model status (Ollama)", expanded=True):
-        ollama_client = get_ollama_client()
-        ollama_ok, ollama_msg = rg.check_ollama_available(ollama_client)
-        if ollama_ok:
-            st.success(f"✅ {ollama_msg} (model: `{rg.OLLAMA_MODEL}`)")
+    with st.expander("⚙️ API configuration (Groq)", expanded=not bool(st.session_state.groq_api_key)):
+        key_input = st.text_input(
+            "Groq API key",
+            type="password",
+            value=st.session_state.groq_api_key,
+            help=(
+                "Free, no-credit-card key from console.groq.com. Powers query rewriting "
+                "and final answer generation -- embeddings and grading run locally either way."
+            ),
+        )
+        if key_input != st.session_state.groq_api_key:
+            st.session_state.groq_api_key = key_input
+
+        if st.session_state.groq_api_key:
+            groq_ok, groq_msg = cached_check_groq(st.session_state.groq_api_key)
+            if groq_ok:
+                st.success(f"✅ {groq_msg} (model: `{rg.GROQ_MODEL}`)")
+            else:
+                st.error(groq_msg)
         else:
-            st.error(ollama_msg)
             st.caption(
-                "DocuTrust runs entirely free and offline using a local LLM via "
-                "[Ollama](https://ollama.com) — no API key needed. "
-                f"Install Ollama, then run `ollama pull {rg.OLLAMA_MODEL}` in a terminal."
+                "No key set yet. Get a free one at "
+                "[console.groq.com](https://console.groq.com/keys) — "
+                "no credit card required."
             )
 
     uploaded_files = st.file_uploader(
@@ -333,58 +356,61 @@ with right:
         query = st.chat_input("Ask a question about the uploaded policy document(s)...")
 
         if query:
-            ollama_client = get_ollama_client()
-            ollama_ok, ollama_msg = rg.check_ollama_available(ollama_client)
-            if not ollama_ok:
-                st.error(ollama_msg)
+            if not st.session_state.groq_api_key:
+                st.error("Please add your Groq API key in the sidebar config above before asking a question.")
             else:
-                with st.chat_message("user"):
-                    st.write(query)
+                groq_ok, groq_msg = cached_check_groq(st.session_state.groq_api_key)
+                if not groq_ok:
+                    st.error(groq_msg)
+                else:
+                    groq_client = get_groq_client(st.session_state.groq_api_key)
+                    with st.chat_message("user"):
+                        st.write(query)
 
-                st.session_state.trace_log = []
+                    st.session_state.trace_log = []
 
-                def on_trace(ev: rg.TraceEvent):
-                    st.session_state.trace_log.append(ev)
-                    render_trace_log()
+                    def on_trace(ev: rg.TraceEvent):
+                        st.session_state.trace_log.append(ev)
+                        render_trace_log()
 
-                with st.chat_message("assistant"):
-                    with st.spinner("Running Corrective RAG pipeline..."):
-                        cross_encoder = get_cross_encoder()
-                        embedder = get_embedder()
-                        result = rg.run_crag_pipeline(
-                            query=query,
-                            index=st.session_state.index,
-                            chunks=st.session_state.chunks,
-                            embedder=embedder,
-                            cross_encoder=cross_encoder,
-                            ollama_client=ollama_client,
-                            on_trace=on_trace,
-                        )
-
-                    if result.used_web_fallback:
-                        st.markdown(
-                            '<div class="fallback-banner">⚠️ Local document context was insufficient — '
-                            "the corrective agent rewrote the query and pulled supplementary context from a live web search.</div>",
-                            unsafe_allow_html=True,
-                        )
-                    st.markdown(f'<div class="answer-box">{result.answer}</div>', unsafe_allow_html=True)
-
-                    if result.citations:
-                        st.markdown("**Sources**")
-                        for c in result.citations:
-                            web_badge = '<span class="citation-web-badge">WEB</span>' if c["origin"] == "web" else ""
-                            href_line = f'<br><a href="{c["href"]}" target="_blank">{c["href"]}</a>' if c.get("href") else ""
-                            st.markdown(
-                                f"""
-                                <div class="citation-card">
-                                    <span class="citation-marker">{c['marker']}</span>
-                                    <span class="citation-source">{c['source']}</span>{web_badge}
-                                    <span class="citation-score"> &nbsp;relevance score: {c['score']}</span>
-                                    <div class="citation-preview">"{c['text_preview']}"{href_line}</div>
-                                </div>
-                                """,
-                                unsafe_allow_html=True,
+                    with st.chat_message("assistant"):
+                        with st.spinner("Running Corrective RAG pipeline..."):
+                            cross_encoder = get_cross_encoder()
+                            embedder = get_embedder()
+                            result = rg.run_crag_pipeline(
+                                query=query,
+                                index=st.session_state.index,
+                                chunks=st.session_state.chunks,
+                                embedder=embedder,
+                                cross_encoder=cross_encoder,
+                                groq_client=groq_client,
+                                on_trace=on_trace,
                             )
 
-                st.session_state.chat_history.append({"query": query, "result": result})
-                render_trace_log()
+                        if result.used_web_fallback:
+                            st.markdown(
+                                '<div class="fallback-banner">⚠️ Local document context was insufficient — '
+                                "the corrective agent rewrote the query and pulled supplementary context from a live web search.</div>",
+                                unsafe_allow_html=True,
+                            )
+                        st.markdown(f'<div class="answer-box">{result.answer}</div>', unsafe_allow_html=True)
+
+                        if result.citations:
+                            st.markdown("**Sources**")
+                            for c in result.citations:
+                                web_badge = '<span class="citation-web-badge">WEB</span>' if c["origin"] == "web" else ""
+                                href_line = f'<br><a href="{c["href"]}" target="_blank">{c["href"]}</a>' if c.get("href") else ""
+                                st.markdown(
+                                    f"""
+                                    <div class="citation-card">
+                                        <span class="citation-marker">{c['marker']}</span>
+                                        <span class="citation-source">{c['source']}</span>{web_badge}
+                                        <span class="citation-score"> &nbsp;relevance score: {c['score']}</span>
+                                        <div class="citation-preview">"{c['text_preview']}"{href_line}</div>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+
+                    st.session_state.chat_history.append({"query": query, "result": result})
+                    render_trace_log()
