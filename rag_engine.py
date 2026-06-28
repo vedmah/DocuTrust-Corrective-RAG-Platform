@@ -9,8 +9,9 @@ Pipeline stages (mirrors the CRAG pattern described in the project brief):
   3. GRADE     -> score each retrieved chunk against the query with a local cross-encoder
   4. CORRECT   -> if grading says the local context is weak/insufficient, rewrite the query
                   and fall back to a live web search for supplementary context
-  5. GENERATE  -> call a local LLM (via Ollama) with ONLY the surviving (graded-relevant)
-                  chunks and require strict inline citations back to source chunk IDs
+  5. GENERATE  -> call a hosted LLM via the Groq API with ONLY the surviving
+                  (graded-relevant) chunks and require strict inline citations
+                  back to source chunk IDs
 
 Every stage emits structured "trace" events so the UI can render a real-time
 step-by-step agent log, which is the centerpiece of the product brief.
@@ -22,9 +23,13 @@ single deployable unit (matching your two-file project pattern) while
 preserving the same conceptual architecture: documents + metadata, chunk
 indices, and persisted trace logs.
 
-No API key is required anywhere in this pipeline. Generation runs on a local
-LLM served by Ollama (https://ollama.com) -- install Ollama, run
-`ollama pull llama3.2` once, and the whole app runs fully offline and free.
+Embeddings and cross-encoder grading run fully locally and free (no API key).
+Only generation and query-rewriting call out to Groq's hosted inference API
+(https://console.groq.com), which has a genuinely free, no-credit-card tier --
+sign up, copy an API key, paste it into the app's sidebar (or set it as the
+GROQ_API_KEY environment variable). This swap (vs. a fully local Ollama setup)
+is what makes the app deployable on Streamlit Community Cloud, since Cloud
+containers can't run a local Ollama server.
 """
 
 from __future__ import annotations
@@ -47,7 +52,7 @@ try:
 except ImportError:  # pragma: no cover - fallback for older installs
     from duckduckgo_search import DDGS  # type: ignore
 
-import ollama
+import groq
 
 
 # --------------------------------------------------------------------------- #
@@ -57,10 +62,13 @@ import ollama
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CROSS_ENCODER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-# Local LLM served by Ollama (https://ollama.com) -- fully free, no API key.
-# Must be pulled once on the machine running this app: `ollama pull llama3.2`
-OLLAMA_MODEL = "llama3.2"
-OLLAMA_HOST = "http://localhost:11434"
+# Hosted LLM served by Groq (https://console.groq.com) -- free tier, no credit
+# card required. Sign up, create an API key, and either set it as the
+# GROQ_API_KEY environment variable or paste it into the app's sidebar.
+# llama-3.1-8b-instant is used by default for its generous free-tier rate
+# limits (14,400 requests/day); swap to llama-3.3-70b-versatile for higher
+# answer quality at a lower daily cap (1,000 requests/day).
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 CHUNK_SIZE_CHARS = 900          # ~ a few sentences of policy text per chunk
 CHUNK_OVERLAP_CHARS = 150       # keeps clause continuity across chunk boundaries
@@ -124,33 +132,30 @@ def load_cross_encoder() -> CrossEncoder:
     return CrossEncoder(CROSS_ENCODER_MODEL_NAME)
 
 
-def get_ollama_client(host: str = OLLAMA_HOST) -> ollama.Client:
-    return ollama.Client(host=host)
+def get_groq_client(api_key: str) -> groq.Groq:
+    return groq.Groq(api_key=api_key)
 
 
-def check_ollama_available(client: ollama.Client, model: str = OLLAMA_MODEL) -> tuple[bool, str]:
+def check_groq_available(client: groq.Groq, model: str = GROQ_MODEL) -> tuple[bool, str]:
     """
-    Returns (ok, message). Checks that the Ollama server is reachable and that
-    the requested model has been pulled locally.
+    Returns (ok, message). Makes a minimal real call to confirm the API key is
+    valid and the model is reachable, since Groq has no lightweight "ping" endpoint.
     """
     try:
-        models_resp = client.list()
-        available = [m.model for m in models_resp.models]
+        client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+        )
+    except groq.AuthenticationError:
+        return False, "Invalid Groq API key. Double-check the key from console.groq.com and try again."
+    except groq.RateLimitError:
+        return True, "Groq API key is valid, but the free-tier rate limit was just hit. It should reset shortly."
+    except groq.APIConnectionError as e:
+        return False, f"Could not reach Groq's API. Check your internet connection. ({e})"
     except Exception as e:
-        return False, (
-            "Could not connect to Ollama. Make sure Ollama is installed and running "
-            f"(`ollama serve`), then try again. ({e})"
-        )
-
-    # Ollama tags often include a ":latest" suffix; match loosely on the base name.
-    matched = any(model == m or m.startswith(f"{model}:") or m.startswith(model) for m in available)
-    if not matched:
-        return False, (
-            f"Ollama is running, but model '{model}' is not pulled yet. "
-            f"Run `ollama pull {model}` in a terminal, then refresh this page. "
-            f"Models currently available: {', '.join(available) if available else 'none'}."
-        )
-    return True, "Ollama is running and the model is ready."
+        return False, f"Groq check failed: {e}"
+    return True, "Groq API key is valid and the model is ready."
 
 
 # --------------------------------------------------------------------------- #
@@ -326,12 +331,13 @@ def grade_chunks(
 # Correction: query rewrite + web fallback
 # --------------------------------------------------------------------------- #
 
-def rewrite_query(query: str, ollama_client: ollama.Client, on_trace: Callable[[TraceEvent], None]) -> str:
+def rewrite_query(query: str, groq_client: groq.Groq, on_trace: Callable[[TraceEvent], None]) -> str:
     on_trace(TraceEvent("Query Rewriter Agent", "running", "Local context insufficient. Rewriting query for web search..."))
 
     try:
-        resp = ollama_client.chat(
-            model=OLLAMA_MODEL,
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            max_tokens=60,
             messages=[{
                 "role": "user",
                 "content": (
@@ -341,7 +347,7 @@ def rewrite_query(query: str, ollama_client: ollama.Client, on_trace: Callable[[
                 ),
             }],
         )
-        rewritten = resp.message.content.strip().strip('"')
+        rewritten = resp.choices[0].message.content.strip().strip('"')
     except Exception as e:
         on_trace(TraceEvent("Query Rewriter Agent", "warning", "Rewrite failed, using original query.", str(e)))
         return query
@@ -413,23 +419,24 @@ You must answer ONLY using the numbered context chunks provided. Rules:
 def generate_answer(
     query: str,
     graded: list[GradedChunk],
-    ollama_client: ollama.Client,
+    groq_client: groq.Groq,
     on_trace: Callable[[TraceEvent], None],
 ) -> tuple[str, list[dict]]:
-    on_trace(TraceEvent("Generator Agent", "running", f"Generating cited answer from validated context with local model ({OLLAMA_MODEL})..."))
+    on_trace(TraceEvent("Generator Agent", "running", f"Generating cited answer from validated context with Groq ({GROQ_MODEL})..."))
 
     context_block = build_context_block(graded)
     user_msg = f"Context chunks:\n\n{context_block}\n\nQuestion: {query}"
 
     try:
-        resp = ollama_client.chat(
-            model=OLLAMA_MODEL,
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            max_tokens=1024,
             messages=[
                 {"role": "system", "content": GENERATION_SYSTEM_PROMPT},
                 {"role": "user", "content": user_msg},
             ],
         )
-        answer = resp.message.content.strip()
+        answer = resp.choices[0].message.content.strip()
     except Exception as e:
         on_trace(TraceEvent("Generator Agent", "error", "Generation failed.", str(e)))
         return f"Generation failed: {e}", []
@@ -462,7 +469,7 @@ def run_crag_pipeline(
     chunks: list[Chunk],
     embedder: SentenceTransformer,
     cross_encoder: CrossEncoder,
-    ollama_client: ollama.Client,
+    groq_client: groq.Groq,
     on_trace: Callable[[TraceEvent], None],
 ) -> RAGResult:
     """Runs retrieve -> grade -> (correct if needed) -> generate, emitting trace events throughout."""
@@ -490,7 +497,7 @@ def run_crag_pipeline(
             f"Only {len(relevant)} relevant chunk(s) found locally (need {MIN_RELEVANT_CHUNKS}). Triggering correction."
         ))
 
-        rewritten = rewrite_query(query, ollama_client, emit)
+        rewritten = rewrite_query(query, groq_client, emit)
         web_chunks = web_fallback_search(rewritten, emit)
 
         if web_chunks:
@@ -515,7 +522,7 @@ def run_crag_pipeline(
         )
 
     # 4. Generate with strict citations
-    answer, citations = generate_answer(query, relevant, ollama_client, emit)
+    answer, citations = generate_answer(query, relevant, groq_client, emit)
 
     return RAGResult(
         answer=answer,
